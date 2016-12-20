@@ -382,6 +382,7 @@ rocksdb_set_bulk_load(THD*                     thd,
 // Options definitions
 //////////////////////////////////////////////////////////////////////////////
 static long long rocksdb_block_cache_size;
+static double rocksdb_block_cache_high_pri_pool_ratio;
 /* Use unsigned long long instead of uint64_t because of MySQL compatibility */
 static unsigned long long  // NOLINT(runtime/int)
     rocksdb_rate_limiter_bytes_per_sec;
@@ -851,12 +852,27 @@ static MYSQL_SYSVAR_LONGLONG(block_cache_size, rocksdb_block_cache_size,
   nullptr, nullptr, 512*1024*1024L,
   /* min */ 1024L, /* max */ LONGLONG_MAX, /* Block size */1024L);
 
+static MYSQL_SYSVAR_DOUBLE(block_cache_high_pri_pool_ratio,
+  rocksdb_block_cache_high_pri_pool_ratio,
+  PLUGIN_VAR_RQCMDARG | PLUGIN_VAR_READONLY,
+  "block_cache high-pri pool ratio for RocksDB",
+  nullptr, nullptr, 0.0,
+  /* min */ 0.0, /* max */ 1.0, /* Block size */0);
+
 static MYSQL_SYSVAR_BOOL(cache_index_and_filter_blocks,
   *reinterpret_cast<my_bool*>(
       &rocksdb_tbl_options.cache_index_and_filter_blocks),
   PLUGIN_VAR_RQCMDARG | PLUGIN_VAR_READONLY,
   "BlockBasedTableOptions::cache_index_and_filter_blocks for RocksDB",
   nullptr, nullptr, true);
+
+static MYSQL_SYSVAR_BOOL(cache_index_and_filter_blocks_with_high_priority,
+  *reinterpret_cast<my_bool*>(
+      &rocksdb_tbl_options.cache_index_and_filter_blocks_with_high_priority),
+  PLUGIN_VAR_RQCMDARG | PLUGIN_VAR_READONLY,
+  "BlockBasedTableOptions::cache_index_and_filter_blocks_with_high_priority "
+  "for RocksDB",
+  nullptr, nullptr, false);
 
 // When pin_l0_filter_and_index_blocks_in_cache is true, RocksDB will  use the
 // LRU cache, but will always keep the filter & idndex block's handle checked
@@ -1200,7 +1216,9 @@ static struct st_mysql_sys_var* rocksdb_system_variables[]= {
   MYSQL_SYSVAR(enable_write_thread_adaptive_yield),
 
   MYSQL_SYSVAR(block_cache_size),
+  MYSQL_SYSVAR(block_cache_high_pri_pool_ratio),
   MYSQL_SYSVAR(cache_index_and_filter_blocks),
+  MYSQL_SYSVAR(cache_index_and_filter_blocks_with_high_priority),
   MYSQL_SYSVAR(pin_l0_filter_and_index_blocks_in_cache),
   MYSQL_SYSVAR(index_type),
   MYSQL_SYSVAR(hash_index_allow_collision),
@@ -3624,8 +3642,14 @@ static int rocksdb_init_func(void* const p)
     (rocksdb::BlockBasedTableOptions::IndexType)rocksdb_index_type;
 
   if (!rocksdb_tbl_options.no_block_cache) {
-    rocksdb_tbl_options.block_cache=
-        rocksdb::NewLRUCache(rocksdb_block_cache_size);
+    if (!rocksdb_tbl_options.cache_index_and_filter_blocks_with_high_priority) {
+      rocksdb_tbl_options.block_cache=
+          rocksdb::NewLRUCache(rocksdb_block_cache_size);
+    } else {
+      rocksdb_tbl_options.block_cache=
+          rocksdb::NewLRUCache(rocksdb_block_cache_size, 6, false,
+                               rocksdb_block_cache_high_pri_pool_ratio);
+    }
   }
   // Using newer BlockBasedTable format version for better compression
   // and better memory allocation.
